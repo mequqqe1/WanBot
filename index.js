@@ -1,10 +1,10 @@
 const { Telegraf, Markup } = require('telegraf');
 
 // ==== НАСТРОЙКИ ====
-const BOT_TOKEN = '8049050039:AAFUvD0SsVr26_pR06imGPmL8toh_7N5e_I';
+const BOT_TOKEN = '8049050039:AAFUvD0SsVr26_pR06imGPmL8toh_7N5e_I'; // подставь свой токен
 
 // ID канала/чата, куда будут прилетать анкеты (типичный вид: -1001234567890)
-const REVIEW_CHAT_ID = -5024825539;
+const REVIEW_CHAT_ID = -1002675583233;
 
 // Ссылка-приглашение в чат, куда добавляем принятых
 const INVITE_LINK = 'https://t.me/freedommakerschat';
@@ -30,7 +30,6 @@ const MUTE_MS = 60_000;        // тайм-аут (1 минута)
  * Иначе false — можно продолжать обработку.
  */
 function isSpam(ctx) {
-  // работаем только с личками, в других чатах мы и так почти молчим
   if (!ctx.from || ctx.chat.type !== 'private') return false;
 
   const userId = ctx.from.id;
@@ -47,13 +46,10 @@ function isSpam(ctx) {
 
   const info = spamTracker[userId];
 
-  // если юзер в муте
   if (now < info.mutedUntil) {
-    // чтобы не спамить предупреждениями — просто игнорим
     return true;
   }
 
-  // если окно давно прошло — обнуляем
   if (now - info.windowStart > SPAM_WINDOW_MS) {
     info.windowStart = now;
     info.count = 0;
@@ -62,13 +58,12 @@ function isSpam(ctx) {
 
   info.count++;
 
-  // если превысил лимит — мьютим
   if (info.count > SPAM_LIMIT) {
     info.mutedUntil = now + MUTE_MS;
 
     if (!info.warned) {
       info.warned = true;
-      ctx.reply('Не спамь чел');
+      ctx.reply('Ты слишком часто пишешь  Давай немного подождём и продолжим через минуту.');
     }
 
     return true;
@@ -77,13 +72,45 @@ function isSpam(ctx) {
   return false;
 }
 
+// ==== ЧС (бан-лист) ====
+
+const bannedUsers = new Set();
+
+/**
+ * Проверка на бан
+ * true — забанен, дальше ничего не делаем
+ */
+function isBanned(ctx) {
+  if (!ctx.from) return false;
+  const userId = ctx.from.id;
+  if (bannedUsers.has(userId)) {
+    if (ctx.chat.type === 'private') {
+      ctx.reply('Доступ к анкете для тебя ограничен.');
+    }
+    return true;
+  }
+  return false;
+}
+
+// ==== Статистика ====
+
+const stats = {
+  total: 0,     // всего отправлено анкет на модерацию
+  approved: 0,  // одобрено
+  rejected: 0,  // отклонено / ЧС
+};
+
+function getPendingCount() {
+  return stats.total - stats.approved - stats.rejected;
+}
+
 // ===================
 
 // Команда /start — запускаем анкетирование (Только в ЛИЧКЕ!)
 bot.start((ctx) => {
   if (ctx.chat.type !== 'private') return;
-
   if (isSpam(ctx)) return;
+  if (isBanned(ctx)) return;
 
   const userId = ctx.from.id;
 
@@ -92,10 +119,10 @@ bot.start((ctx) => {
     data: {}
   };
 
-  ctx.reply('Привет! Давай заполним анкету 😊\nСначала скажи, пожалуйста, свой возраст:');
+  ctx.reply('Привет! Давай заполним анкету \nСначала скажи, пожалуйста, свой возраст:');
 });
 
-// Команда /chatid — оставим только для лички
+// Команда /chatid — только для лички (для тебя, если нужно)
 bot.command('chatid', (ctx) => {
   if (ctx.chat.type !== 'private') return;
   if (isSpam(ctx)) return;
@@ -103,11 +130,35 @@ bot.command('chatid', (ctx) => {
   ctx.reply(`ID этого чата: ${ctx.chat.id}`);
 });
 
+// Команда /stats — для админ-чата и лички
+bot.command('stats', (ctx) => {
+  const chatId = ctx.chat.id;
+
+  // Разрешаем только:
+  // - в админ-чате (REVIEW_CHAT_ID)
+  // - или в личке
+  if (chatId !== REVIEW_CHAT_ID && ctx.chat.type !== 'private') {
+    return; // игнорим в других местах
+  }
+
+  if (ctx.chat.type === 'private' && isSpam(ctx)) return;
+
+  const pending = getPendingCount();
+
+  ctx.reply(
+    `📊 Статистика анкет:\n\n` +
+    `Всего анкет: ${stats.total}\n` +
+    `Одобрено: ${stats.approved}\n` +
+    `Отклонено / ЧС: ${stats.rejected}\n` +
+    `В ожидании: ${pending}`
+  );
+});
+
 // Обработка любого текста (по шагам анкеты) — ТОЛЬКО ЛИЧКА
 bot.on('text', async (ctx) => {
   if (ctx.chat.type !== 'private') return;
-
   if (isSpam(ctx)) return;
+  if (isBanned(ctx)) return;
 
   const userId = ctx.from.id;
   const text = ctx.message.text.trim();
@@ -123,7 +174,7 @@ bot.on('text', async (ctx) => {
   if (state.step === 'age') {
     const ageNum = parseInt(text, 10);
     if (isNaN(ageNum) || ageNum <= 0 || ageNum > 120) {
-      await ctx.reply('Похоже, это не очень похоже на возраст 🙈\nНапиши, пожалуйста, настоящий возраст цифрами:');
+      await ctx.reply('Похоже, это не очень похоже на возраст \nНапиши, пожалуйста, настоящий возраст цифрами:');
       return;
     }
 
@@ -144,7 +195,6 @@ bot.on('text', async (ctx) => {
     state.data.city = text;
     state.step = 'done';
 
-    // Формируем анкету
     const { age, name } = state.data;
     const city = text;
 
@@ -168,7 +218,10 @@ bot.on('text', async (ctx) => {
       userLine
     ].join('\n');
 
-    // Отправляем в канал модерации с кнопками Принять / Отказать
+    // Увеличиваем счётчик анкет
+    stats.total++;
+
+    // Отправляем в канал модерации с кнопками Принять / Отказать / ЧС
     try {
       await ctx.telegram.sendMessage(
         REVIEW_CHAT_ID,
@@ -178,7 +231,8 @@ bot.on('text', async (ctx) => {
             inline_keyboard: [
               [
                 { text: '✅ Принять', callback_data: `approve:${userId}` },
-                { text: '❌ Отказать', callback_data: `reject:${userId}` }
+                { text: '❌ Отказать', callback_data: `reject:${userId}` },
+                { text: '🚫 ЧС (бан нах)', callback_data: `ban:${userId}` },
               ]
             ]
           }
@@ -197,7 +251,7 @@ bot.on('text', async (ctx) => {
   }
 });
 
-// Обработка нажатий по кнопкам "Принять" / "Отказать"
+// Обработка нажатий по кнопкам "Принять" / "Отказать" / "ЧС"
 bot.on('callback_query', async (ctx) => {
   const data = ctx.callbackQuery.data;
 
@@ -213,7 +267,12 @@ bot.on('callback_query', async (ctx) => {
     return;
   }
 
+  // Тут больше НЕТ проверки на список модеров —
+  // жать могут все, кто видит кнопки в админ-чате
+
   if (action === 'approve') {
+    stats.approved++;
+
     await ctx.answerCbQuery('Анкета принята ✅');
 
     try {
@@ -241,7 +300,7 @@ https://graph.org/Pravila-povedeniya-na-vstrechah-07-28
 https://graph.org/Dop-pravila-k-alko-vstrecham-07-28-2
 
 📌 Важная информация для участников:
-https://graph.org/Vazhnaya-informaciya-dlya-uchastnikov-07-28-4
+https://graph.org/Vazhnaya-informaciya-dlya-uchastников-07-28-4
 
 Ждём тебя ❤️`
       );
@@ -250,11 +309,36 @@ https://graph.org/Vazhnaya-informaciya-dlya-uchastnikov-07-28-4
     }
 
   } else if (action === 'reject') {
+    stats.rejected++;
+
     await ctx.answerCbQuery('Анкета отклонена ❌');
 
     try {
       await ctx.editMessageReplyMarkup();
     } catch (e) {}
+
+    // Пользователю ничего не пишем
+
+  } else if (action === 'ban') {
+    stats.rejected++;
+    bannedUsers.add(targetUserId);
+
+    await ctx.answerCbQuery('Пользователь добавлен в ЧС 🚫');
+
+    try {
+      await ctx.editMessageReplyMarkup();
+    } catch (e) {}
+
+    // Если хочешь уведомлять забаненного — можно раскомментить:
+    // try {
+    //   await ctx.telegram.sendMessage(
+    //     targetUserId,
+    //     'Доступ к анкете для тебя ограничен.'
+    //   );
+    // } catch (err) {
+    //   console.error('Ошибка отправки уведомления забаненному пользователю:', err);
+    // }
+
   } else {
     await ctx.answerCbQuery();
   }
